@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Local project data / generated artifacts
+*.db
+projects/
+
+# Editor / OS
+*.swp
+.DS_Store
+.idea/
+.vscode/
+
+# vim helptags are committed so :help works without a plugin-manager
+# :helptags pass; regenerate locally with `:helptags doc/` after edits.

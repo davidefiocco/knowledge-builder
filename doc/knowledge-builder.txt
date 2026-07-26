@@ -1,0 +1,335 @@
+*knowledge-builder.txt*   Personalized test -> review -> test learning loop
+
+Author:  knowledge-builder
+License: same as project
+
+==============================================================================
+CONTENTS                                            *knowledge-builder-contents*
+
+  1. Introduction ................... |knowledge-builder-introduction|
+  2. Requirements .................. |knowledge-builder-requirements|
+  3. Setup ......................... |knowledge-builder-setup|
+  4. Projects ...................... |knowledge-builder-projects|
+  5. Commands ...................... |knowledge-builder-commands|
+  6. Workflow ...................... |knowledge-builder-workflow|
+  7. Keymaps ....................... |knowledge-builder-keymaps|
+  8. Configuration ................. |knowledge-builder-configuration|
+  9. Local models (Ollama) ......... |knowledge-builder-ollama|
+ 10. Headless API .................. |knowledge-builder-api|
+ 11. Testing ...................... |knowledge-builder-testing|
+ 12. Health ....................... |knowledge-builder-health|
+
+==============================================================================
+1. INTRODUCTION                                 *knowledge-builder-introduction*
+
+knowledge-builder is a Neovim plugin that builds a personalized learning loop
+from your own inputs. Instead of a fixed exercise bank it:
+
+  1. BUILDS a syllabus on the fly from your inputs (a job description, your CV,
+     or free-form goals).
+  2. TESTS you with a fresh set of questions over that syllabus, grading each
+     answer. Run a test as often as you like; questions differ each time and
+     results are tracked across the sequence of runs.
+  3. REVIEWS (optionally) between tests by generating study material and letting
+     you talk to a streaming tutor.
+
+Progress is tracked per topic across runs, so you see how you improve against
+your past self. The flow is driven by generative models, so content is dynamic
+and tailored rather than pre-authored. Open/code answers are graded by an LLM;
+multiple choice is graded deterministically.
+
+==============================================================================
+2. REQUIREMENTS                                 *knowledge-builder-requirements*
+
+  - Neovim 0.10+
+  - nui.nvim          https://github.com/MunifTanjim/nui.nvim
+  - sqlite.lua        https://github.com/kkharji/sqlite.lua
+  - curl on $PATH
+  - An LLM token in $HF_TOKEN (an OpenAI-compatible endpoint; the Hugging Face
+    router is the default). A local Ollama also works, see
+    |knowledge-builder-ollama|.
+
+Run |:checkhealth| knowledge-builder to verify your environment.
+
+==============================================================================
+3. SETUP                                               *knowledge-builder-setup*
+
+                                                  *knowledge-builder.setup()*
+Install with your plugin manager and call setup(). With lazy.nvim: >lua
+
+    {
+      "knowledge-builder",
+      dependencies = { "MunifTanjim/nui.nvim", "kkharji/sqlite.lua" },
+      config = function()
+        require("knowledge-builder").setup({})
+      end,
+    }
+<
+setup() accepts a table that is deep-merged over the defaults. See
+|knowledge-builder-configuration|.
+
+==============================================================================
+4. PROJECTS                                         *knowledge-builder-projects*
+
+Everything is persisted in a PROJECT: a directory under the workspace root
+(default `stdpath("data")/knowledge-builder/projects/<slug>/`): >
+
+    <slug>/
+      knowledge.db      SQLite database
+      syllabus.json     structured syllabus (source of truth)
+      syllabus.md       human-readable, editable
+      materials/        generated review material
+<
+A project owns ONE persistent syllabus. Each test (and review) pass is a
+RUN that reuses that syllabus, which is what makes per-topic progress against
+your past self possible.
+
+Resuming: a project is fully durable. The last project you opened is
+remembered, so any |:KB| command in a new Neovim session picks it back up
+automatically; open a different one with |:KB| `open`. The syllabus, all past
+runs, levels, and materials are preserved. (Resuming a single run that was
+interrupted mid-question is not yet supported; starting a new run generates
+fresh questions.)
+
+                                             *knowledge-builder-topic-identity*
+Topic identity is STABLE across syllabus edits. Refining the syllabus matches
+topics by name and updates them in place, so a topic keeps its score history.
+A topic dropped from the syllabus is ARCHIVED rather than deleted: it stops
+appearing in tests and pickers, but its past levels and questions remain, and
+re-adding it by the same name restores it with its history intact.
+
+==============================================================================
+5. COMMANDS                                         *knowledge-builder-commands*
+
+                                                                          *:KB*
+:KB [subcommand] [args]   Entry point for all functionality. With no (or an
+                          unknown) subcommand, shows the |:KB help| cheat sheet.
+
+    :KB help              Show a compact in-editor cheat sheet of commands and
+                          keys. Also shown for a bare or unknown ":KB".
+    :KB start             Create a project, provide inputs (JD/CV/text), and
+                          build the syllabus.
+    :KB open [name]       Open an existing project. Without a name, shows a
+                          picker.
+    :KB list              List all projects.
+    :KB syllabus refine {instruction}
+                          Revise the current syllabus from a natural-language
+                          instruction (e.g. "add Kubernetes, drop topic 4").
+                          The model rewrites the topic list and re-saves it;
+                          syllabus.md reloads to show the result. With no
+                          instruction, prompts for one.
+    :KB test              Take a test over the syllabus: a fresh set of
+                          questions, graded. Run it as often as you like; the
+                          questions differ each time and runs are tracked for
+                          progress. How many questions each topic gets depends
+                          on its weight and your last score on it, see
+                          |knowledge-builder-allocation|.
+    :KB review [topic]    Generate review material for a topic. Without a
+                          topic, offers a picker ordered weakest-first with
+                          each topic's current level.
+    :KB tutor             Open the streaming tutor chat. The tutor is briefed
+                          on your weakest topics and the questions you most
+                          recently got wrong, including the grader's feedback.
+    :KB progress          Show per-topic levels, the delta vs. your previous
+                          run, and a sparkline of every completed run.
+    :KB results [run]     Show a per-question grading report for a completed
+                          run: each question with your answer, the score,
+                          pass/fail, and the grader's feedback, grouped by
+                          topic. Without an argument, shows the latest
+                          completed run; with several runs, offers a picker.
+                          Pass a numeric run id to jump straight to it.
+
+==============================================================================
+6. WORKFLOW                                         *knowledge-builder-workflow*
+
+A typical session: >
+
+    :KB start             " name the project, paste a JD/CV or goals
+                          " -> the syllabus is generated and opens in a buffer
+    :KB syllabus refine "add a topic on caching"   " optional: tweak it
+    :KB test              " answer generated questions; per-topic levels saved
+    :KB results           " review per-question grades, answers, and feedback
+    :KB review            " optional: pick a weak topic, generate material
+    :KB tutor             " optional: tutor already knows what you got wrong
+    :KB test              " test again; weak topics now get more questions
+    :KB progress          " see improvement per topic vs. your past self
+<
+The loop tightens as you go: each test allocates its questions from your last
+scores, so repeated runs converge on your weak spots rather than re-covering
+ground you have already proven.
+
+==============================================================================
+7. KEYMAPS                                           *knowledge-builder-keymaps*
+
+These are buffer-local within the relevant UI and are configurable under
+`keymaps` (see |knowledge-builder-configuration|).
+
+Test (|:KB| test)~
+
+    <C-s>     Grade the current answer. Stays on the question; the prompt
+              header shows the resulting score so you can refine and re-grade.
+    <C-n>     Next question. The current answer is remembered.
+    <C-p>     Previous question. Saved answers are restored, so you can skip a
+              hard question and return to it later.
+    <C-f>     Finish: grade any answered-but-ungraded questions (unanswered
+              ones score 0) and show the run summary.
+    1-9       Choose a multiple-choice option
+    <C-g>     Ask for a short, non-revealing hint
+    q         Close (abandons the run without finishing)
+
+Tutor (|:KB| tutor)~
+
+    <C-s>     Send the message (the reply streams in token-by-token)
+    q         Close
+
+==============================================================================
+8. CONFIGURATION                               *knowledge-builder-configuration*
+
+Defaults (override any subset via setup()): >lua
+
+    require("knowledge-builder").setup({
+      storage = {
+        workspace = vim.fn.stdpath("data") .. "/knowledge-builder/projects",
+      },
+      llm = {
+        model = "Qwen/Qwen3-Coder-Next",
+        api_url = "https://router.huggingface.co/v1/chat/completions",
+        hf_token_env = "HF_TOKEN",
+        temperature = 0.7,
+        grading_temperature = 0.1,
+        max_tokens = 1024,
+        timeout = 180,
+      },
+      assess = {
+        questions_per_topic = 2,
+        min_questions_per_topic = 1,
+        max_questions_per_topic = 5,
+        weighting = true,
+        adaptive = true,
+        pass_threshold = 0.6,
+        max_concurrency = 1,
+      },
+      chat = { max_history_messages = 20 },
+      ui = { width = 0.8, height = 0.8, border = "rounded" },
+      keymaps = {
+        exam = { submit = "<C-s>", next_question = "<C-n>",
+                 prev_question = "<C-p>", finish = "<C-f>",
+                 hint = "<C-g>", close = "q" },
+        chat = { send = "<C-s>", close = "q" },
+      },
+    })
+<
+                                          *knowledge-builder-max_concurrency*
+assess.max_concurrency controls how many requests run at once, both when
+generating questions and when grading the remaining answers at the end of a
+test. Keep it at 1 for local single-instance backends (e.g. Ollama) that
+serialize requests; raise it for hosted APIs to work in parallel.
+
+                                             *knowledge-builder-allocation*
+How many questions a topic gets in a run~
+
+The count starts at `questions_per_topic` and is then scaled by two factors
+before being clamped to [`min_questions_per_topic`, `max_questions_per_topic`]:
+
+  - WEIGHT (`assess.weighting`, default on). The topic's syllabus weight,
+    a float in 0.5-2.0 set when the syllabus is built or refined. A topic the
+    model considers central to your goal gets proportionally more questions.
+
+  - MASTERY (`assess.adaptive`, default on). Your most recent level on the
+    topic. A topic you scored 0 on (or have never been tested on) is scaled by
+    1.5; one you scored 1.0 on is scaled by 0.5. Successive tests therefore
+    concentrate on what you are actually weak at instead of re-asking what you
+    have already demonstrated.
+
+Set either flag to false for a flat `questions_per_topic` across all topics.
+
+Topic weight also determines the OVERALL percentage in |:KB| `results`, which
+is a weighted mean over graded questions rather than a plain average.
+
+                                          *knowledge-builder-max_history*
+chat.max_history_messages caps how many tutor turns are replayed to the model
+on each send (the system briefing is always kept). The full transcript stays
+in the buffer; only what is sent is trimmed, so a long session cannot creep
+past the context window.
+
+==============================================================================
+9. LOCAL MODELS (OLLAMA)                               *knowledge-builder-ollama*
+
+knowledge-builder talks to any OpenAI-compatible endpoint, so a local Ollama
+works with no HuggingFace dependency. Point `llm.api_url` at it and pick a
+model. No token is required for a local endpoint: the Authorization header is
+omitted automatically when the token env var is unset. Keep `max_concurrency`
+at 1 and give thinking models a generous `max_tokens`: >lua
+
+    require("knowledge-builder").setup({
+      llm = {
+        api_url = "http://localhost:11434/v1/chat/completions",
+        model = "gemma4:12b-it-qat",
+        max_tokens = 2048,
+      },
+      assess = { max_concurrency = 1 },
+    })
+<
+==============================================================================
+10. HEADLESS API                                         *knowledge-builder-api*
+
+The whole flow is drivable without the UI via `require("knowledge-builder").api`
+(module `knowledge-builder.api`). All functions return plain, JSON-serializable
+tables, so they can be called over RPC (e.g. from pynvim). Key functions:
+
+    create_project({ name, slug?, source_inputs? })
+    open_project(slug)
+    list_projects()
+    build_syllabus(source_inputs, timeout_ms)
+    set_syllabus(topics)            inject topics directly (tests)
+    start_run(phase, timeout_ms)    phase label, defaults to "test"
+    inject_run(phase, questions)    inject questions directly (tests)
+    get_current_question()          -> { ok, done, index, total, question }
+    submit_answer(answer, timeout_ms) -> { ok, score, passed, feedback,
+                                           run_finished }
+    finalize_run()                  -> { ok, run_id, levels, progress }
+    get_run_report(run_id)          -> { ok, report } per-question grading
+
+`finalize_run().levels` is a map keyed by topic id (as a string) to a 0..1
+score, so it serializes as a JSON object.
+
+==============================================================================
+11. TESTING                                          *knowledge-builder-testing*
+
+Two tiers.
+
+Tier 1 - deterministic (default)~
+Fast headless tests with the LLM mocked; no token or network needed: >
+
+    KB_WORKSPACE=$(mktemp -d) \
+      nvim --headless -u dev/init.lua -l test/test_flow.lua
+<
+A Dockerfile runs the same suite in a clean environment: >
+
+    docker build -t knowledge-builder-test .
+    docker run --rm knowledge-builder-test
+<
+Tier 2 - LLM-in-the-loop (opt-in)~
+A Python + pynvim harness with two LLM roles: a simulated-user agent answers
+each question and a judge agent verifies the interaction. Gated behind a
+marker and a token: >
+
+    HF_TOKEN=... uv run -m pytest test/test_llm_loop.py -m llm -v
+<
+Default pytest runs exclude it (see pytest.ini).
+
+==============================================================================
+12. HEALTH                                            *knowledge-builder-health*
+
+                                            *knowledge-builder-checkhealth*
+Run: >
+
+    :checkhealth knowledge-builder
+<
+It checks the Neovim version, nui.nvim, sqlite.lua, curl, the LLM token env
+var, and the workspace directory, then sends a one-token request to the
+configured endpoint. That live probe catches a wrong `api_url`, an invalid
+token, or a local model that has not been pulled, before you wait through a
+syllabus build to find out.
+
+vim:tw=78:ts=8:ft=help:norl:

@@ -1,0 +1,53 @@
+name: Test
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: JohnnyMorganz/stylua-action@v4
+        with:
+          token: ${{ github.token }}
+          version: latest
+          args: --check lua/ plugin/ dev/ test/
+
+      - uses: YoloWingPixie/selene-lua-linter-action@v1
+        with:
+          config-path: selene.toml
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build test image
+        run: docker build -t knowledge-builder-test .
+
+      - name: Run Tier 1 headless tests
+        run: docker run --rm knowledge-builder-test
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Compile Python tooling
+        run: |
+          uv run --no-project -- python -m py_compile tools/pdf_to_text.py tools/extract_syllabus.py test/test_pdf_to_text.py test/test_llm_loop.py
+
+      # Offline Python tests (no token, no network). pypdf is installed so the
+      # pdf_to_text suite actually runs instead of being importorskip-ped.
+      # Tier 2 LLM-in-the-loop tests stay excluded by default (pytest.ini
+      # addopts = -m "not llm"); they need HF_TOKEN and run separately.
+      - name: Run offline Python tests
+        run: |
+          uv run --with pytest --with pypdf -- pytest -v
